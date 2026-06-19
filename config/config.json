@@ -1,0 +1,50 @@
+{
+    "pattern1": {
+        "mode": "hsv",
+        "send_image": true,
+        "hsv": {
+            "h_min": 72,
+            "h_max": 85,
+            "s_min": 100,
+            "s_max": 255,
+            "v_min": 100,
+            "v_max": 255
+        },
+        "exg": {
+            "offset": 0
+        },
+        "yolo": {
+            "conf_thresh": 0.5,
+            "api_key": "",
+            "model_ids": [
+                "disease-hy965/1",
+                "",
+                ""
+            ]
+        }
+    },
+    "pattern2": {
+        "mode": "yolo",
+        "send_image": false,
+        "hsv": {
+            "h_min": 35,
+            "h_max": 85,
+            "s_min": 100,
+            "s_max": 255,
+            "v_min": 100,
+            "v_max": 255
+        },
+        "exg": {
+            "offset": 0
+        },
+        "yolo": {
+            "conf_thresh": 0.5,
+            "api_key": "",
+            "model_ids": [
+                "yolov8n-640",
+                "",
+                ""
+            ]
+        }
+    }
+}

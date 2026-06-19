@@ -1,0 +1,13 @@
+# 画像処理用ライブラリ
+opencv-python==4.9.0.80
+
+# AI/YOLO用ライブラリ
+inference==0.9.11
+supervision==0.19.0
+
+
+# 通信用ライブラリ
+paho-mqtt==1.6.1
+
+# ユーティリティ
+numpy==1.26.4

@@ -1,0 +1,47 @@
+
+services:
+  # MQTTブローカー
+  mqtt-broker:
+    image: eclipse-mosquitto:2.0.15
+    ports:
+      - "1883:1883"
+    command: mosquitto -c /mosquitto/config/mosquitto.conf
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  # メイン画像処理サービス（バックグラウンド処理）
+  app-main:
+    build: .
+    volumes:
+      - ./app:/app/app
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./shared_results:/app/shared_results
+    working_dir: /app/app
+    command: python main.py
+    depends_on:
+      - mqtt-broker
+    environment:
+      - MQTT_BROKER=mqtt-broker
+      - MQTT_PORT=1883
+      - DISPLAY=host.docker.internal:0
+
+  # GUI制御サービス（Tkinter）
+  app-gui:
+    build: .
+    volumes:
+      - ./app:/app/app
+      - ./config:/app/config
+    working_dir: /app/app
+    command: python gui.py
+    environment:
+      # WindowsのX11サーバー (VcXsrvなど) 向けのDISPLAY設定
+      - DISPLAY=host.docker.internal:0
+    # X11のためにホストネットワークを使用する場合もありますが、
+    # Windows/Docker Desktop環境であれば host.docker.internal で通信可能です。
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
