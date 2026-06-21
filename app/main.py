@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 import os
 import cv2
 import threading
@@ -7,24 +8,57 @@ import paho.mqtt.client as mqtt
 from image_loader import load_images_from_folder
 from image_processor import process_image
 from result_sender import ResultSender
+from pathlib import Path
 
-CONFIG_PATH = "../config/config.json"
-DATA_DIR = "../data"
-SHARED_DIR = "../shared_results"
-KICK_TOPIC = "smart_agri/kick"
+CONFIG_PATH = "/app/config/config.json"
+DATA_DIR = Path("/app/captured_images")
+SHARED_DIR = "/app/shared_results"
 
-# 処理実行を要求するフラグ
+KICK_TOPIC = "tele/greenhouse/app_main/start"
+STOP_TOPIC = "tele/greenhouse/app_main/stop"
+# ─── ✨ リアルタイム設定変更（Node-RED連動）の追加 ───
+CONFIG_TOPIC = "cmnd/greenhouse/image_processor/config"
+
+# フラグ管理・設定データのグローバル化
 process_trigger = False
+stop_trigger = False
+current_config = {}  # 毎サイクル最新の設定を参照できるようにグローバル化
+
 
 def on_connect(client, userdata, flags, rc):
-    print(f"MQTTブローカーに接続しました（キック待機用）。コード: {rc}")
+    print(f"MQTTブローカーに接続しました。コード: {rc}")
     client.subscribe(KICK_TOPIC)
-    print(f"トピック '{KICK_TOPIC}' をサブスクライブしました。")
+    client.subscribe(STOP_TOPIC)
+    client.subscribe(CONFIG_TOPIC)  # ─── ✨ 修正：設定変更トピックも耳を傾ける ───
+    print(f"トピック '{KICK_TOPIC}', '{STOP_TOPIC}', '{CONFIG_TOPIC}' をサブスクライブしました。")
+
 
 def on_message(client, userdata, msg):
-    global process_trigger
-    print(f"キック通知を受信しました: {msg.topic}")
-    process_trigger = True
+    global process_trigger, stop_trigger, current_config
+    print(f"MQTT通知を受信しました: {msg.topic}")
+    
+    if msg.topic == KICK_TOPIC:
+        process_trigger = True
+    elif msg.topic == STOP_TOPIC:
+        print("停止信号を受信しました！")
+        stop_trigger = True
+    elif msg.topic == CONFIG_TOPIC:
+        try:
+            payload_str = msg.payload.decode("utf-8")
+            new_config = json.loads(payload_str)
+            
+            # 1. メモリの値を最新に置き換える
+            current_config = new_config
+            print("⚙️ [MQTT] Node-REDから新しい設定を受信し、リアルタイム適用しました。")
+            
+            # 2. ✨【追加】PCフォルダの config.json に最新設定を自動で上書き保存する
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(current_config, f, indent=4, ensure_ascii=False)
+            print("💾 [SAVE] 最新の設定を config.json に永続保存しました！")
+            
+        except Exception as e:
+            print(f"設定JSONのパースまたは保存に失敗しました: {e}")
+
 
 def load_config() -> dict:
     try:
@@ -34,19 +68,20 @@ def load_config() -> dict:
         print(f"設定ファイルの読み込みエラー: {e}")
         return {}
 
+
 def process_and_send(pattern_name, img, config, sender, filename):
     mode = config.get("mode", "hsv")
     send_image = config.get("send_image", False)
     
     results = []
     
-    # YOLOの場合はマルチモデル対応
     if mode == "yolo":
         yolo_config = config.get("yolo", {})
         model_ids = yolo_config.get("model_ids", [])
-        api_key = yolo_config.get("api_key", "")
         
-        # モデルが設定されていない場合のフォールバック
+        # ─── ✨ Docker環境変数（金庫）からRoboflowのAPIキーを最優先で取得 ───
+        api_key = os.environ.get("ROBOFLOW_API_KEY", yolo_config.get("api_key", ""))
+        
         if not model_ids:
             model_ids = [""]
             
@@ -55,7 +90,6 @@ def process_and_send(pattern_name, img, config, sender, filename):
                 continue
             
             temp_config = config.copy()
-            # yolo設定をコピーしてmodel_idとapi_keyを付与
             temp_yolo_config = yolo_config.copy()
             temp_yolo_config["model_id"] = model_id
             temp_yolo_config["api_key"] = api_key
@@ -65,7 +99,6 @@ def process_and_send(pattern_name, img, config, sender, filename):
             sub_pattern_name = f"{pattern_name}_yolo_{idx+1}"
             results.append((sub_pattern_name, res))
     else:
-        # 古典的手法など
         res = process_image(img.copy(), config)
         results.append((pattern_name, res))
 
@@ -81,95 +114,103 @@ def process_and_send(pattern_name, img, config, sender, filename):
         if send_image:
             payload["image_b64"] = sender.encode_image(res_img)
             
-        # 独立した結果としてMQTT送信
         sender.send_single_result(filename, name, payload)
         
-        # 検出結果がある場合のみ共有フォルダに保存
-        if result_value > 0:
-            os.makedirs(SHARED_DIR, exist_ok=True)
-            save_path = os.path.join(SHARED_DIR, f"{name}_{filename}")
-            cv2.imwrite(save_path, res_img)
-            
-        # プレビュー表示
-        cv2.imshow(f"Preview - {name}", res_img)
+        os.makedirs(SHARED_DIR, exist_ok=True)
+        save_path = os.path.join(SHARED_DIR, f"{name}_{filename}")
+        cv2.imwrite(save_path, res_img)
+
 
 def main():
-    global process_trigger
+    global process_trigger, stop_trigger, current_config
     print("メイン統括プログラム（司令塔）を開始します...")
-    broker = os.environ.get("MQTT_BROKER", "mqtt-broker")
+    broker = os.environ.get("MQTT_BROKER", "mosquitto")
     port = int(os.environ.get("MQTT_PORT", 1883))
     
-    # キック動作用のMQTTクライアント設定
     client = mqtt.Client()
     client.on_connect = on_connect
     client.on_message = on_message
     
     try:
         client.connect(broker, port, 60)
-        client.loop_start()  # バックグラウンドで受信ループを開始
+        client.loop_start()  # バックグラウンドで待ち受け開始
     except Exception as e:
         print(f"MQTTブローカーへの接続に失敗しました: {e}")
+        return
         
-    sender = ResultSender(broker=broker, port=port)
+    sender = ResultSender(client=client)
     
-    last_modified = 0
-    current_config = {}
+    # 起動時の初期値として config.json をロード
+    current_config = load_config()
+
+    print("【待機状態】Node-REDからの信号を待っています...")
 
     while True:
         try:
-            # GUIのためにcv2のイベントループを回しておく
-            if cv2.waitKey(100) & 0xFF == 27:
+            # 停止フラグが立っていたら、ループを抜けてコンテナを終了する
+            if stop_trigger:
+                print("停止フラグを検知したため、プログラムを安全に終了します。")
                 break
-                
-            if os.path.exists(CONFIG_PATH):
-                mtime = os.path.getmtime(CONFIG_PATH)
-                if mtime != last_modified:
-                    current_config = load_config()
-                    last_modified = mtime
-                    print(f"設定が更新されました。")
-                    
-            # フラグが立っていなければ待機
+
+            # キック信号が来るまで待機
             if not process_trigger:
                 time.sleep(0.5)
                 continue
 
-            print("処理を開始します...")
+            print("キック信号を検知しました。画像処理を開始します...")
             images = load_images_from_folder(DATA_DIR)
             if not images:
                 print(f"{DATA_DIR} に画像が見つかりません。")
                 process_trigger = False
                 continue
 
-            # 2パターンの設定を取得
-            p1_config = current_config.get("pattern1", {})
-            p2_config = current_config.get("pattern2", {})
+    
+            p1_config = current_config.get("pattern1", {}).copy()
+            if "mode" in p1_config and p1_config["mode"] in p1_config:
+                p1_config.update(p1_config.get(p1_config["mode"], {}))
+
+            p2_config = current_config.get("pattern2", {}).copy()
+            if "mode" in p2_config and p2_config["mode"] in p2_config:
+                p2_config.update(p2_config.get(p2_config["mode"], {}))
 
             for i, (file_path, img) in enumerate(images):
                 filename = os.path.basename(file_path)
-                
-                # ====== パターン1 と パターン2 の処理 ======
                 process_and_send("pattern1", img, p1_config, sender, filename)
-                process_and_send("pattern2", img, p2_config, sender, filename)
+                #process_and_send("pattern2", img, p2_config, sender, filename)
                 
-                # 処理が終わった元の画像を削除する
-                try:
-                    os.remove(file_path)
-                except Exception as e:
-                    print(f"画像削除エラー: {e}")
+                # ─── ✨【完全修正】型ズレ・初期化漏れを絶対に許さない削除ガード ───
+                delete_flag = current_config.get("delete_image", False)
+                
+                # ブール値のTrue、または文字列の"true"の場合のみ、かつ厳密に判定
+                if delete_flag is True or str(delete_flag).lower() == "true":
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                            print(f"🗑️ [DELETE] 画面設定(ON)に基づき、画像を削除しました: {filename}")
+                    except Exception as e:
+                        print(f"画像削除エラー: {e}")
+                else:
+                    print(f"💾 [KEEP] 画面設定(OFF)または初期状態に基づき、画像を保持しました: {filename}")
             
-            print("処理が完了しました。次のキックを待機します...")
-            # 全ての画像を処理したらフラグを戻す
-            process_trigger = False
+            print("すべての画像処理とMQTT送信が完了しました。Node-REDからの信号を待ちます...")
+            process_trigger = False  
             
         except KeyboardInterrupt:
-            print("処理を終了します。")
+            print("ユーザーにより終了します。")
             break
         except Exception as e:
-            print(f"エラー: {e}")
+            current_filename = filename if 'filename' in locals() else 'unknown'
+            error_msg = f"画像処理中に致命的エラーが発生しました: {str(e)}"
+            print(error_msg)
+            sender.send_error(filename=current_filename, error_message=str(e))
             process_trigger = False
             time.sleep(2)
             
+    # ループを抜けたらMQTT接続を綺麗に閉じて終了
     client.loop_stop()
+    client.disconnect()
+    print("プログラムが正常に終了しました。")
+
 
 if __name__ == "__main__":
     main()

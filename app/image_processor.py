@@ -1,5 +1,13 @@
+import os
 import cv2
 import numpy as np
+
+# ✨【超安全化】ultralytics が無くても、エラーを出さずに通常処理（HSV/ExG）を生かす
+try:
+    from ultralytics import YOLO
+except Exception:
+    YOLO = None
+
 try:
     from inference import get_model
     import supervision as sv
@@ -7,8 +15,10 @@ except ImportError:
     get_model = None
     sv = None
 
-# Roboflowモデルのキャッシュ用辞書
+# モデルのキャッシュ用辞書
+local_model_cache = {}
 model_cache = {}
+
 
 def get_roboflow_model(model_id: str, api_key: str):
     if not get_model:
@@ -32,25 +42,7 @@ def get_roboflow_model(model_id: str, api_key: str):
 
 def process_image(img: np.ndarray, config: dict) -> dict:
     """
-    画像データと設定パラメータを受け取り、指定されたモードで処理を行う関数。
-    外部ファイルや通信に依存しない純粋な関数として設計。
-    
-    Args:
-        img (np.ndarray): 処理対象の画像 (BGRフォーマット)
-        config (dict): パラメータを格納した辞書
-            例: {
-                "mode": "hsv" | "exg" | "yolo",
-                "hsv": {"h_min":0, "h_max":180, "s_min":0, ...},
-                "exg": {"offset": 0},
-                "yolo": {"conf_thresh": 0.5}
-            }
-            
-    Returns:
-        dict: {
-            "mode": 実行されたモード(str),
-            "processed_image": 処理後の画像(np.ndarray),
-            "result_value": 抽出面積(%) や 検出数などの数値結果(float|int)
-        }
+    画像データと設定パラメータを受け取り、指定されたモードで処理を行うメイン関数。
     """
     mode = config.get("mode", "hsv")
     
@@ -77,6 +69,10 @@ def _process_hsv(img: np.ndarray, params: dict) -> dict:
     s_max = params.get("s_max", 255)
     v_min = params.get("v_min", 100)
     v_max = params.get("v_max", 255)
+    
+    # ✨ OpenCVの上限値180に安全にクリップ
+    h_min = int(np.clip(h_min, 0, 180))
+    h_max = int(np.clip(h_max, 0, 180))
     
     # HSV空間へ変換
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -105,7 +101,7 @@ def _process_exg(img: np.ndarray, params: dict) -> dict:
     """モード2: 拡張緑色指標(ExG) + 大津の二値化"""
     offset = params.get("offset", 0)
     
-    # OpenCVはBGRなので、分割
+    # OpenCVはBGRなので分割
     b, g, r = cv2.split(img.astype(np.float32))
     
     # ExG = 2G - R - B
@@ -116,10 +112,9 @@ def _process_exg(img: np.ndarray, params: dict) -> dict:
     exg = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
     
     # 大津の二値化
-    # 戻り値の thresh は自動計算された閾値
     thresh_val, mask = cv2.threshold(exg, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     
-    # 手動オフセットを適用して再計算（もしオフセットが指定されている場合）
+    # 手動オフセットを適用して再計算
     if offset != 0:
         new_thresh = np.clip(thresh_val + offset, 0, 255)
         _, mask = cv2.threshold(exg, new_thresh, 255, cv2.THRESH_BINARY)
@@ -140,31 +135,71 @@ def _process_exg(img: np.ndarray, params: dict) -> dict:
 
 
 def _process_yolo(img: np.ndarray, params: dict) -> dict:
-    """モード3: YOLO(Roboflow)による物体検出"""
+    """モード3: YOLOによる物体検出（ローカル.pt / Roboflow ハイブリッド）"""
     conf_thresh = params.get("conf_thresh", 0.5)
     model_id = params.get("model_id", "")
     api_key = params.get("api_key", "")
     
-    roboflow_model = get_roboflow_model(model_id, api_key)
-    
-    if roboflow_model is None or sv is None:
-        # モデルがない場合はエラーを返す代わりに元画像をそのまま返す
-        return {"mode": "yolo", "processed_image": img.copy(), "result_value": 0}
+    # ─── ✨ もし入力された名前が「.pt」で終わる場合（ローカル実行） ───
+    if model_id.endswith(".pt"):
+        if YOLO is None:
+            return {
+                "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
+                "status": "error", "error_message": "ultralytics がインストールされていません。"
+            }
         
-    # 推論実行 (Inference SDK)
-    results = roboflow_model.infer(img)
-    if isinstance(results, list):
+        model_path = os.path.join("/app/config", model_id)
+        if not os.path.exists(model_path):
+            return {
+                "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
+                "status": "error", "error_message": f"モデルファイルが見つかりません: {model_path}"
+            }
+            
+        try:
+            if model_path not in local_model_cache:
+                local_model_cache[model_path] = YOLO(model_path)
+            model = local_model_cache[model_path]
+            
+            results = model(img, conf=conf_thresh)[0]
+            annotated_image = results.plot()
+            detected_count = len(results.boxes)
+            
+            return {
+                "mode": "yolo",
+                "processed_image": annotated_image,
+                "result_value": detected_count
+            }
+        except Exception as e:
+            return {
+                "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
+                "status": "error", "error_message": f"ローカルYOLO推論エラー: {str(e)}"
+            }
+
+    # ─── 💡 以降は、既存のRoboflow用ロジック ───
+    roboflow_model = get_roboflow_model(model_id, api_key)
+    if roboflow_model is None or sv is None:
+        return {
+            "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
+            "status": "error", "error_message": "Roboflow model initialization failed"
+        }
+        
+    try:
+        results = roboflow_model.infer(img)
+    except Exception as e:
+        print(f"Roboflow推論エラー: {e}")
+        return {
+            "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
+            "status": "error", "error_message": f"Inference failed: {str(e)}"
+        }
+
+    if isinstance(results, list): 
         result = results[0]
-    else:
+    else: 
         result = results
         
-    # Supervisionで結果をパース
     detections = sv.Detections.from_inference(result)
-    
-    # 信頼度の閾値でフィルタリング
     detections = detections[detections.confidence >= conf_thresh]
     
-    # 描画
     box_annotator = sv.BoxAnnotator()
     label_annotator = sv.LabelAnnotator()
     
@@ -180,11 +215,4 @@ def _process_yolo(img: np.ndarray, params: dict) -> dict:
     ]
     annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
     
-    # 検出されたオブジェクト数
-    detected_count = len(detections)
-    
-    return {
-        "mode": "yolo",
-        "processed_image": annotated_image,
-        "result_value": detected_count
-    }
+    return {"mode": "yolo", "processed_image": annotated_image, "result_value": len(detections)}
