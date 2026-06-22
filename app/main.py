@@ -5,7 +5,7 @@ import os
 import cv2
 import threading
 import paho.mqtt.client as mqtt
-from image_loader import load_images_from_folder
+# from image_loader import load_images_from_folder  # ← 不要になったのでコメントアウト
 from image_processor import process_image
 from result_sender import ResultSender
 from pathlib import Path
@@ -59,8 +59,6 @@ def process_and_send(pattern_name, img, config, sender, filename):
     if mode == "yolo":
         yolo_config = config.get("yolo", {})
         model_ids = yolo_config.get("model_ids", [])
-        
-        # ─── ✨ Docker環境変数（金庫）からRoboflowのAPIキーを最優先で取得 ───
         api_key = os.environ.get("ROBOFLOW_API_KEY", yolo_config.get("api_key", ""))
         
         if not model_ids:
@@ -76,6 +74,7 @@ def process_and_send(pattern_name, img, config, sender, filename):
             temp_yolo_config["api_key"] = api_key
             temp_config["yolo"] = temp_yolo_config
             
+            # image_processor で画像処理（YOLO推論）を実行
             res = process_image(img.copy(), temp_config)
             sub_pattern_name = f"{pattern_name}_yolo_{idx+1}"
             results.append((sub_pattern_name, res))
@@ -83,18 +82,39 @@ def process_and_send(pattern_name, img, config, sender, filename):
         res = process_image(img.copy(), config)
         results.append((pattern_name, res))
 
+    # ─── 📊 検出サイズ（w, h）の算出とMQTT送信処理 ───
     for name, res in results:
         res_img = res.get("processed_image")
-        result_value = res.get("result_value", 0)
+        result_value = res.get("result_value", 0) # 検出数
         
+        # 基本のペイロードを作成
         payload = {
             "mode": res.get("mode"),
-            "result_value": result_value
+            "result_value": result_value,
+            "detected_objects": []  # 各オブジェクトのサイズを入れる配列
         }
+        
+        # image_processor側から生の検出リスト（predictions等）が返ってきている場合、サイズを抽出
+        # ※お使いのimage_processorの戻り値の構造（辞書のキー）に合わせて調整してください
+        predictions = res.get("predictions", [])
+        for pred in predictions:
+            # 枠のサイズ（ピクセル）を取得
+            box_w = pred.get("width", 0)
+            box_h = pred.get("height", 0)
+            class_name = pred.get("class", "unknown")
+            confidence = pred.get("confidence", 0.0)
+            
+            payload["detected_objects"].append({
+                "class": class_name,
+                "confidence": confidence,
+                "width_px": int(box_w),
+                "height_px": int(box_h)
+            })
         
         if send_image:
             payload["image_b64"] = sender.encode_image(res_img)
             
+        # Node-RED等に向けてMQTT送信
         sender.send_single_result(filename, name, payload)
         
         os.makedirs(SHARED_DIR, exist_ok=True)
@@ -126,6 +146,9 @@ def main():
 
     print("【待機状態】Node-REDからの信号を待っています...")
 
+    # ターゲットとなる最新画像のフルパスを定義
+    LATEST_IMAGE_PATH = os.path.join(DATA_DIR, "latest.jpg")
+
     while True:
         try:
             # 停止フラグが立っていたら、ループを抜けてコンテナを終了する
@@ -138,14 +161,22 @@ def main():
                 time.sleep(0.5)
                 continue
 
-            print("キック信号を検知しました。画像処理を開始します...")
-            images = load_images_from_folder(DATA_DIR)
-            if not images:
-                print(f"{DATA_DIR} に画像が見つかりません。")
+            print("キック信号を検知しました。最新の画像をチェックします...")
+            
+            # ─── 🛠️ 修正：latest.jpg が存在するか直接チェック ───
+            if not os.path.exists(LATEST_IMAGE_PATH):
+                print(f"❌ エラー: {LATEST_IMAGE_PATH} が見つかりません。カメラのキャプチャがまだ実行されていない可能性があります。")
                 process_trigger = False
                 continue
 
-    
+            # OpenCVで latest.jpg を直接読み込む
+            img = cv2.imread(LATEST_IMAGE_PATH)
+            if img is None:
+                print("❌ エラー: latest.jpg の読み込みに失敗しました（書き込み中によるファイルの破損など）。")
+                process_trigger = False
+                continue
+
+            # 設定値のパース準備
             p1_config = current_config.get("pattern1", {}).copy()
             if "mode" in p1_config and p1_config["mode"] in p1_config:
                 p1_config.update(p1_config.get(p1_config["mode"], {}))
@@ -154,25 +185,20 @@ def main():
             if "mode" in p2_config and p2_config["mode"] in p2_config:
                 p2_config.update(p2_config.get(p2_config["mode"], {}))
 
-            for i, (file_path, img) in enumerate(images):
-                filename = os.path.basename(file_path)
-                process_and_send("pattern1", img, p1_config, sender, filename)
-                #process_and_send("pattern2", img, p2_config, sender, filename)
-                
-                # ─── 💾 画像は常に保持する運用へ変更 ───
-                print(f"💾 [KEEP] 処理が完了したため、画像を保持しました: {filename}")
+            # ─── 🛠️ 修正：ループ処理を撤廃し、latest.jpg に対して1回だけ処理を実行 ───
+            process_and_send("pattern1", img, p1_config, sender, "latest.jpg")
+            # process_and_send("pattern2", img, p2_config, sender, "latest.jpg")
             
-            print("すべての画像処理とMQTT送信が完了しました。Node-REDからの信号を待ちます...")
+            print("💾 [KEEP] latest.jpg の画像処理とMQTT送信が完了しました。ファイルを保持します。")
             process_trigger = False  
             
         except KeyboardInterrupt:
             print("ユーザーにより終了します。")
             break
         except Exception as e:
-            current_filename = filename if 'filename' in locals() else 'unknown'
             error_msg = f"画像処理中に致命的エラーが発生しました: {str(e)}"
             print(error_msg)
-            sender.send_error(filename=current_filename, error_message=str(e))
+            sender.send_error(filename="latest.jpg", error_message=str(e))
             process_trigger = False
             time.sleep(2)
             

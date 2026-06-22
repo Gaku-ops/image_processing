@@ -148,7 +148,12 @@ def _process_yolo(img: np.ndarray, params: dict) -> dict:
                 "status": "error", "error_message": "ultralytics がインストールされていません。"
             }
         
-        model_path = os.path.join("/app/config", model_id)
+        # パス指定がない場合はデフォルトで /app/config 内を探す設定
+        if os.path.isabs(model_id):
+            model_path = model_id
+        else:
+            model_path = os.path.join("/app/config", model_id)
+
         if not os.path.exists(model_path):
             return {
                 "mode": "yolo", "processed_image": img.copy(), "result_value": -1,
@@ -164,9 +169,30 @@ def _process_yolo(img: np.ndarray, params: dict) -> dict:
             annotated_image = results.plot()
             detected_count = len(results.boxes)
             
+            # ─── 🛠️ 修正: メインプログラムにサイズ情報を引き渡すためのリスト作成 ───
+            predictions = []
+            for box in results.boxes:
+                # 座標(x1, y1, x2, y2)から幅と高さを計算
+                xyxy = box.xyxy[0].tolist()
+                w = xyxy[2] - xyxy[0]
+                h = xyxy[3] - xyxy[1]
+                
+                # クラスIDから名前（potted plantなど）を取得
+                class_id = int(box.cls[0])
+                class_name = model.names[class_id]
+                confidence = float(box.conf[0])
+                
+                predictions.append({
+                    "class": class_name,
+                    "confidence": confidence,
+                    "width": w,
+                    "height": h
+                })
+            
             return {
                 "mode": "yolo",
                 "processed_image": annotated_image,
+                "predictions": predictions,  # メイン側に横流し
                 "result_value": detected_count
             }
         except Exception as e:
@@ -206,6 +232,20 @@ def _process_yolo(img: np.ndarray, params: dict) -> dict:
     annotated_image = img.copy()
     annotated_image = box_annotator.annotate(scene=annotated_image, detections=detections)
     
+    # Roboflow側のpredictions構造にも合わせるための処理
+    predictions = []
+    for i in range(len(detections)):
+        xyxy = detections.xyxy[i]
+        w = xyxy[2] - xyxy[0]
+        h = xyxy[3] - xyxy[1]
+        c_name = detections.data['class_name'][i] if 'class_name' in detections.data else str(detections.class_id[i])
+        predictions.append({
+            "class": c_name,
+            "confidence": float(detections.confidence[i]),
+            "width": w,
+            "height": h
+        })
+
     labels = [
         f"{detections.data['class_name'][i]} {detections.confidence[i]:.2f}"
         for i in range(len(detections))
@@ -215,4 +255,9 @@ def _process_yolo(img: np.ndarray, params: dict) -> dict:
     ]
     annotated_image = label_annotator.annotate(scene=annotated_image, detections=detections, labels=labels)
     
-    return {"mode": "yolo", "processed_image": annotated_image, "result_value": len(detections)}
+    return {
+        "mode": "yolo", 
+        "processed_image": annotated_image, 
+        "predictions": predictions, 
+        "result_value": len(detections)
+    }
