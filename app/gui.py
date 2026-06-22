@@ -152,7 +152,7 @@ class ConfigGUI:
         try:
             client = mqtt.Client()
             client.connect(broker, port, 60)
-            client.publish("smart_agri/kick", "kick_from_gui")
+            client.publish("tele/greenhouse/app_main/start", "kick_from_gui")
             client.disconnect()
             print("GUIからキック通知を送信しました。")
         except Exception as e:

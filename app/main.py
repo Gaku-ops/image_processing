@@ -16,8 +16,6 @@ SHARED_DIR = "/app/shared_results"
 
 KICK_TOPIC = "tele/greenhouse/app_main/start"
 STOP_TOPIC = "tele/greenhouse/app_main/stop"
-# ─── ✨ リアルタイム設定変更（Node-RED連動）の追加 ───
-CONFIG_TOPIC = "cmnd/greenhouse/image_processor/config"
 
 # フラグ管理・設定データのグローバル化
 process_trigger = False
@@ -29,8 +27,7 @@ def on_connect(client, userdata, flags, rc):
     print(f"MQTTブローカーに接続しました。コード: {rc}")
     client.subscribe(KICK_TOPIC)
     client.subscribe(STOP_TOPIC)
-    client.subscribe(CONFIG_TOPIC)  # ─── ✨ 修正：設定変更トピックも耳を傾ける ───
-    print(f"トピック '{KICK_TOPIC}', '{STOP_TOPIC}', '{CONFIG_TOPIC}' をサブスクライブしました。")
+    print(f"トピック '{KICK_TOPIC}', '{STOP_TOPIC}' をサブスクライブしました。")
 
 
 def on_message(client, userdata, msg):
@@ -42,22 +39,6 @@ def on_message(client, userdata, msg):
     elif msg.topic == STOP_TOPIC:
         print("停止信号を受信しました！")
         stop_trigger = True
-    elif msg.topic == CONFIG_TOPIC:
-        try:
-            payload_str = msg.payload.decode("utf-8")
-            new_config = json.loads(payload_str)
-            
-            # 1. メモリの値を最新に置き換える
-            current_config = new_config
-            print("⚙️ [MQTT] Node-REDから新しい設定を受信し、リアルタイム適用しました。")
-            
-            # 2. ✨【追加】PCフォルダの config.json に最新設定を自動で上書き保存する
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(current_config, f, indent=4, ensure_ascii=False)
-            print("💾 [SAVE] 最新の設定を config.json に永続保存しました！")
-            
-        except Exception as e:
-            print(f"設定JSONのパースまたは保存に失敗しました: {e}")
 
 
 def load_config() -> dict:
@@ -178,19 +159,8 @@ def main():
                 process_and_send("pattern1", img, p1_config, sender, filename)
                 #process_and_send("pattern2", img, p2_config, sender, filename)
                 
-                # ─── ✨【完全修正】型ズレ・初期化漏れを絶対に許さない削除ガード ───
-                delete_flag = current_config.get("delete_image", False)
-                
-                # ブール値のTrue、または文字列の"true"の場合のみ、かつ厳密に判定
-                if delete_flag is True or str(delete_flag).lower() == "true":
-                    try:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                            print(f"🗑️ [DELETE] 画面設定(ON)に基づき、画像を削除しました: {filename}")
-                    except Exception as e:
-                        print(f"画像削除エラー: {e}")
-                else:
-                    print(f"💾 [KEEP] 画面設定(OFF)または初期状態に基づき、画像を保持しました: {filename}")
+                # ─── 💾 画像は常に保持する運用へ変更 ───
+                print(f"💾 [KEEP] 処理が完了したため、画像を保持しました: {filename}")
             
             print("すべての画像処理とMQTT送信が完了しました。Node-REDからの信号を待ちます...")
             process_trigger = False  
