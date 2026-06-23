@@ -22,6 +22,7 @@ class ResultSender:
         try:
             payload = {
                 "filename": filename,
+                "status": "success",
                 "pattern1": p1_data,
                 "pattern2": p2_data
             }
@@ -38,6 +39,7 @@ class ResultSender:
             payload = {
                 "filename": filename,
                 "pattern_name": pattern_name,
+                "status": "success",
                 "data": data
             }
             json_payload = json.dumps(payload)
