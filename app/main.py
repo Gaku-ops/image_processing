@@ -203,7 +203,7 @@ def main():
             process_and_send("pattern1", img, p1_config, sender, requested_filename)
             # process_and_send("pattern2", img, p2_config, sender, requested_filename)
             
-            print("💾 [KEEP] latest.jpg の画像処理とMQTT送信が完了しました。ファイルを保持します。")
+            print("💾 [KEEP] 画像処理とMQTT送信が完了しました。ファイルを保持します。")
             process_trigger = False  
             
         except KeyboardInterrupt:
