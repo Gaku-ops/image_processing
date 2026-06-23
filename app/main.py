@@ -212,7 +212,7 @@ def main():
         except Exception as e:
             error_msg = f"画像処理中に致命的エラーが発生しました: {str(e)}"
             print(error_msg)
-            sender.send_error(filename="latest.jpg", error_message=str(e))
+            sender.send_error(filename=requested_filename, error_message=str(e))
             process_trigger = False
             time.sleep(2)
             
