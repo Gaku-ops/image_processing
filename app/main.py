@@ -20,6 +20,7 @@ STOP_TOPIC = "tele/greenhouse/app_main/stop"
 # フラグ管理・設定データのグローバル化
 process_trigger = False
 stop_trigger = False
+requested_filename = "latest.jpg"
 current_config = {}  # 毎サイクル最新の設定を参照できるようにグローバル化
 
 
@@ -31,11 +32,22 @@ def on_connect(client, userdata, flags, rc):
 
 
 def on_message(client, userdata, msg):
-    global process_trigger, stop_trigger, current_config
+    global process_trigger, stop_trigger, requested_filename, current_config
     print(f"MQTT通知を受信しました: {msg.topic}")
     
     if msg.topic == KICK_TOPIC:
+        payload_text = msg.payload.decode("utf-8", errors="ignore")
+        filename = "latest.jpg"
+        try:
+            payload = json.loads(payload_text)
+            filename = payload.get("filename", filename)
+        except json.JSONDecodeError:
+            if payload_text.strip():
+                filename = payload_text.strip()
+
+        requested_filename = filename
         process_trigger = True
+        print(f"処理対象ファイルを設定しました: {requested_filename}")
     elif msg.topic == STOP_TOPIC:
         print("停止信号を受信しました！")
         stop_trigger = True
@@ -147,7 +159,7 @@ def main():
     print("【待機状態】Node-REDからの信号を待っています...")
 
     # ターゲットとなる最新画像のフルパスを定義
-    LATEST_IMAGE_PATH = os.path.join(DATA_DIR, "latest.jpg")
+    LATEST_IMAGE_PATH = None
 
     while True:
         try:
@@ -161,15 +173,17 @@ def main():
                 time.sleep(0.5)
                 continue
 
-            print("キック信号を検知しました。最新の画像をチェックします...")
+            print(f"キック信号を検知しました。処理対象ファイル: {requested_filename} をチェックします...")
             
-            # ─── 🛠️ 修正：latest.jpg が存在するか直接チェック ───
+            LATEST_IMAGE_PATH = os.path.join(DATA_DIR, requested_filename)
+
+            # ─── 🛠️ 修正：指定されたファイルが存在するか直接チェック ───
             if not os.path.exists(LATEST_IMAGE_PATH):
-                print(f"❌ エラー: {LATEST_IMAGE_PATH} が見つかりません。カメラのキャプチャがまだ実行されていない可能性があります。")
+                print(f"❌ エラー: {LATEST_IMAGE_PATH} が見つかりません。指定ファイルが存在するか確認してください。")
                 process_trigger = False
                 continue
 
-            # OpenCVで latest.jpg を直接読み込む
+            # OpenCVで指定ファイルを読み込む
             img = cv2.imread(LATEST_IMAGE_PATH)
             if img is None:
                 print("❌ エラー: latest.jpg の読み込みに失敗しました（書き込み中によるファイルの破損など）。")
@@ -185,9 +199,9 @@ def main():
             if "mode" in p2_config and p2_config["mode"] in p2_config:
                 p2_config.update(p2_config.get(p2_config["mode"], {}))
 
-            # ─── 🛠️ 修正：ループ処理を撤廃し、latest.jpg に対して1回だけ処理を実行 ───
-            process_and_send("pattern1", img, p1_config, sender, "latest.jpg")
-            # process_and_send("pattern2", img, p2_config, sender, "latest.jpg")
+            # ─── 🛠️ 修正：ループ処理を撤廃し、要求されたファイルに対して1回だけ処理を実行 ───
+            process_and_send("pattern1", img, p1_config, sender, requested_filename)
+            # process_and_send("pattern2", img, p2_config, sender, requested_filename)
             
             print("💾 [KEEP] latest.jpg の画像処理とMQTT送信が完了しました。ファイルを保持します。")
             process_trigger = False  
