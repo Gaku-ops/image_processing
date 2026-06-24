@@ -20,7 +20,7 @@ STOP_TOPIC = "tele/greenhouse/app_main/stop"
 # フラグ管理・設定データのグローバル化
 process_trigger = False
 stop_trigger = False
-requested_filename = "latest.jpg"
+requested_filename = "latest.jpg" #初期値をlatest.jpgに設定　日付ファイルがない場合に処理しない方がよければ変える
 current_config = {}  # 毎サイクル最新の設定を参照できるようにグローバル化
 
 
@@ -186,7 +186,7 @@ def main():
             # OpenCVで指定ファイルを読み込む
             img = cv2.imread(LATEST_IMAGE_PATH)
             if img is None:
-                print("❌ エラー: latest.jpg の読み込みに失敗しました（書き込み中によるファイルの破損など）。")
+                print("❌ エラー: 画像の読み込みに失敗しました（書き込み中によるファイルの破損など）。")
                 process_trigger = False
                 continue
 
