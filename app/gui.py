@@ -144,20 +144,42 @@ class ConfigGUI:
         kick_btn.pack(fill=tk.X, padx=10, pady=10)
 
     def send_kick(self):
-        import paho.mqtt.client as mqtt
+        import paho.mqtt.publish as publish
+        import json
         import os
-        # GUIがホストで動くかコンテナで動くかによってブローカーの向き先が変わるため、環境変数から取得しつつlocalhostをフォールバックに
-        broker = os.environ.get("MQTT_BROKER", "localhost")
-        port = int(os.environ.get("MQTT_PORT", 1883))
-        try:
-            client = mqtt.Client()
-            client.connect(broker, port, 60)
-            client.publish("tele/greenhouse/app_main/start", "kick_from_gui")
-            client.disconnect()
-            print("GUIからキック通知を送信しました。")
-        except Exception as e:
-            print(f"キック通知の送信に失敗しました: {e}")
+        from datetime import datetime
 
+        # 1. 接続先サーバーの決定
+        # GUIをPC(ホスト)で動かすなら "localhost"、コンテナで動かすなら "mosquitto"
+        mqtt_host = os.getenv("MQTT_HOST", "mosquitto")
+        
+        # 2. Node-REDの受信用ノードと100%一致するトピック
+        topic = "stat/greenhouse/camera/captured"
+
+        # 3. カメラスクリプトと完全に同一構造のペイロード
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        payload = {
+            "status": "success",
+            "filename": "latest.jpg",  # 司令塔に前回の最新画像を処理させる
+            "timestamp": timestamp
+        }
+        
+        print(f"--- 🧪 GUIからNode-REDへテスト信号を送信します ---")
+        print(f"送信先ブローカー: {mqtt_host}")
+        print(f"送信先トピック  : {topic}")
+        print(f"ペイロード内容  : {json.dumps(payload)}")
+
+        try:
+            # カメラスクリプトと同じ方法で、QoS=1 で送信
+            publish.single(
+                topic,
+                payload=json.dumps(payload),
+                qos=1,
+                hostname=mqtt_host
+            )
+            print("➔ 🎉 パブリッシュ成功！Node-RED側を確認してください。")
+        except Exception as e:
+            print(f"➔ ❌ パブリッシュ失敗エラー詳細: {e}")
     def load_config(self) -> dict:
         if os.path.exists(CONFIG_PATH):
             try:

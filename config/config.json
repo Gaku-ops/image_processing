@@ -11,7 +11,7 @@
             "v_max": 255
         },
         "exg": {
-            "offset": 40
+            "offset": 20
         },
         "yolo": {
             "conf_thresh": 0.22580645161290322,

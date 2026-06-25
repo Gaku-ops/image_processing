@@ -1,6 +1,7 @@
 import json
 import base64
 import cv2
+import datetime
 import paho.mqtt.client as mqtt
 import numpy as np
 
@@ -69,4 +70,25 @@ class ResultSender:
             return True
         except Exception as e:
             print(f"MQTTエラー送信失敗: {e}")
+            return False
+
+    def send_re_detect(self, filename: str, timestamp: str = None, image: np.ndarray = None) -> bool:
+        try:
+            re_detect_topic = "tele/greenhouse/image_processor/re_detect"
+            payload = {
+                "timestamp": timestamp or datetime.datetime.utcnow().isoformat() + "Z",
+                "filename": filename,
+                "trigger": "re_detect"
+            }
+            if image is not None:
+                b64_image = self.encode_image(image)
+                if b64_image:
+                    payload["image_b64"] = b64_image
+
+            json_payload = json.dumps(payload)
+            self.client.publish(re_detect_topic, json_payload, qos=1)
+            print(f"[{filename}] 🔔 再検知トリガーをトピック '{re_detect_topic}' に送信しました。")
+            return True
+        except Exception as e:
+            print(f"MQTT再検知トリガー送信失敗: {e}")
             return False

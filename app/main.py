@@ -68,17 +68,24 @@ def process_and_send(pattern_name, img, config, sender, filename):
     
     results = []
     
+    print(f"[DEBUG] process_and_send 開始: pattern_name={pattern_name}, mode={mode}")
+    
     if mode == "yolo":
         yolo_config = config.get("yolo", {})
         model_ids = yolo_config.get("model_ids", [])
         api_key = os.environ.get("ROBOFLOW_API_KEY", yolo_config.get("api_key", ""))
+        
+        print(f"[DEBUG] YOLO設定: model_ids={model_ids}, api_key={'設定あり' if api_key else '設定なし'}")
         
         if not model_ids:
             model_ids = [""]
             
         for idx, model_id in enumerate(model_ids):
             if not model_id:
+                print(f"[DEBUG] model_id[{idx}] が空のためスキップ")
                 continue
+            
+            print(f"[DEBUG] model_id[{idx}]={model_id} を処理中...")
             
             temp_config = config.copy()
             temp_yolo_config = yolo_config.copy()
@@ -90,14 +97,21 @@ def process_and_send(pattern_name, img, config, sender, filename):
             res = process_image(img.copy(), temp_config)
             sub_pattern_name = f"{pattern_name}_yolo_{idx+1}"
             results.append((sub_pattern_name, res))
+            print(f"[DEBUG] 処理結果を追加: {sub_pattern_name}")
     else:
+        print(f"[DEBUG] YOLO以外のモード処理: {mode}")
         res = process_image(img.copy(), config)
         results.append((pattern_name, res))
+        print(f"[DEBUG] 処理結果を追加: {pattern_name}")
 
+    print(f"[DEBUG] results 件数: {len(results)}")
+    
     # ─── 📊 検出サイズ（w, h）の算出とMQTT送信処理 ───
     for name, res in results:
         res_img = res.get("processed_image")
         result_value = res.get("result_value", 0) # 検出数
+        
+        print(f"[DEBUG] MQTT送信処理: name={name}, result_value={result_value}")
         
         # 基本のペイロードを作成
         payload = {
@@ -109,6 +123,8 @@ def process_and_send(pattern_name, img, config, sender, filename):
         # image_processor側から生の検出リスト（predictions等）が返ってきている場合、サイズを抽出
         # ※お使いのimage_processorの戻り値の構造（辞書のキー）に合わせて調整してください
         predictions = res.get("predictions", [])
+        print(f"[DEBUG] predictions 件数: {len(predictions)}")
+        
         for pred in predictions:
             # 枠のサイズ（ピクセル）を取得
             box_w = pred.get("width", 0)
@@ -125,9 +141,34 @@ def process_and_send(pattern_name, img, config, sender, filename):
         
         if send_image:
             payload["image_b64"] = sender.encode_image(res_img)
+
+        person_detected = (
+            res.get("mode") == "yolo"
+            and any(
+                isinstance(pred.get("class", ""), str)
+                and (
+                    pred.get("class", "").strip().lower() in {"person", "human", "人", "ヒト"}
+                    or "person" in pred.get("class", "").strip().lower()
+                    or "human" in pred.get("class", "").strip().lower()
+                )
+                for pred in predictions
+            )
+        )
+        
+        print(f"[DEBUG] person_detected={person_detected}, topic送信準備...")
+
+        if person_detected:
+            print(f"[DEBUG] send_re_detect を呼び出します。send_imageフラグの状態: {send_image}")
             
-        # Node-RED等に向けてMQTT送信
-        sender.send_single_result(filename, name, payload)
+         
+            sender.send_re_detect(
+                filename=filename, 
+                image=res_img if send_image else None
+            )
+        else:
+            # Node-RED等に向けてMQTT送信
+            print(f"[DEBUG] send_single_result を呼び出し: topic='tale/greenhouse/image_processor/result'")
+            sender.send_single_result(filename, name, payload)
         
         os.makedirs(SHARED_DIR, exist_ok=True)
         save_path = os.path.join(SHARED_DIR, f"{name}_{filename}")
